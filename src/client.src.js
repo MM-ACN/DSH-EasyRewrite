@@ -1427,6 +1427,23 @@ window.__ModuleLoader__.load({
      * - 标准 standard：与紧凑唯一区别——内容不满一行时自动扩成一行宽（360px）。
      * - 两档超过一行后都保持宽度不再主动扩张（高度自然换行增长）。
      */
+    /**
+     * 编辑框最小宽度：底部按钮行（取消 / 确定 + 各自内边距 + 间距）必须放得下。
+     * 极短消息（如「好」）的气泡只有 40px 上下，若编辑框照抄该宽度，两个按钮会溢出气泡外。
+     * 字宽按按钮字号 13px 估算：全角/CJK 13px、半角 8px（与上游气泡宽度估算一致，13px 下偏保守），另留 8px 余量。
+     */
+    function editMinWidth(labelA, labelB) {
+      var labels = [labelA, labelB];
+      var total = 28 + 8; // 编辑框 padding "8px 14px" + 估算余量
+      for (var i = 0; i < labels.length; i++) {
+        var label = String(labels[i] || "");
+        var button = 32; // 按钮 padding "4px 16px"
+        for (var c = 0; c < label.length; c++) button += label.charCodeAt(c) > 0x2e7f ? 13 : 8;
+        total += button;
+        if (i === 0) total += 8; // 按钮间距 gap "8px"
+      }
+      return Math.ceil(total);
+    }
     function editWidthFor(mode, text, initW) {
       // 扩展："100%" 撑满消息行（此前写死 748px 是旧窗口宽度遗物——内容列更宽时左侧够不到其他文字的左对齐线，2026-09-04 用户实测反馈）
       if (mode === "extended") return "100%";
@@ -2945,6 +2962,9 @@ window.__ModuleLoader__.load({
       var setOpError = errState[1];
       var bubbleInitState = React.useState(0); // bubble 档：进入编辑时气泡原宽
       var bubbleInitW = bubbleInitState[0];
+      var bubbleInitHState = React.useState(0); // 进入编辑时气泡原高：编辑框高度下限（与宽度档位无关）
+      var bubbleInitH = bubbleInitHState[0];
+      var bubbleRef = React.useRef(null); // 气泡 DOM：操作区「编辑」键要量真实气泡，而不是 34px 操作按钮
       var isEditPending = pending && pending.type === "edit" && pending.targetKey === myKey;
       var sEditImgs = React.useState([]); // 气泡编辑图片工作集 [{id, url, dataUrl}]
       var editImages = sEditImgs[0];
@@ -3470,17 +3490,19 @@ window.__ModuleLoader__.load({
       }
 
       // ---------- 编辑态（气泡 rewrite） ----------
-      function enterEdit(initWidth) {
+      function enterEdit(initWidth, initHeight) {
         if (pending) { log("warn", "edit", "已有待处理操作（单待定约束），请先处理"); return; }
         var realSeq = (data && typeof data.seq === "number") ? data.seq : anchorSeq;
         writePending(sessionId, { type: "edit", targetKey: myKey, targetSeq: realSeq, draftText: text, updatedAt: Date.now() });
         if (initWidth && initWidth > 0) bubbleInitState[1](initWidth);
+        if (initHeight && initHeight > 0) bubbleInitHState[1](initHeight);
+        else bubbleInitHState[1](0);
         setEditing(true);
         setEditText(text);
         setEditSel(null);
         setEditImages([]); // v2.4.0：每次进入编辑=干净起点（防反复进出叠加）
         stagedBottomImageIdsRef.current = []; // 暂存列表重置
-        log("info", "edit", "进入编辑态", { sessionId: sessionId, targetSeq: realSeq, initW: initWidth });
+        log("info", "edit", "进入编辑态", { sessionId: sessionId, targetSeq: realSeq, initW: initWidth, initH: initHeight });
         // 带图编辑：把原消息图片桥接成 draft attachments（供编辑态预览和确认发送）
         try {
           var _er = [];
@@ -3635,7 +3657,7 @@ window.__ModuleLoader__.load({
         var sel = window.getSelection && window.getSelection();
         if (sel && typeof sel.toString === "function" && sel.toString().length > 0) return; // 有选区不进入
         if (e.target && typeof e.target.closest === "function" && e.target.closest("a")) return; // 点链接不进入
-        enterEdit(e.currentTarget ? e.currentTarget.offsetWidth : 0);
+        enterEdit(e.currentTarget ? e.currentTarget.offsetWidth : 0, e.currentTarget ? e.currentTarget.offsetHeight : 0);
       }
       if (editing) {
         var editMode = editWidthMode();
@@ -3648,9 +3670,10 @@ window.__ModuleLoader__.load({
             document.head.appendChild(dzSt);
           }
         } catch (eDzSt) { /* ignore */ }
-        var editBoxW = editWidthFor(editMode, editText, bubbleInitW);
+        // 宽度下限：极短消息的气泡比按钮行还窄时，编辑框至少放得下「取消 / 确定」。
+        var editBoxW = Math.max(editMinWidth(L.cancel, L.confirm), editWidthFor(editMode, editText, bubbleInitW));
         var lineCount = (editText.match(/\n/g) || []).length + 1;
-        var taRows = Math.max(1, Math.min(20, lineCount));
+        var taRows = Math.max(1, Math.min(200, lineCount)); // 原上限 20：长消息初次进入编辑只看得到 20 行，高度由 maxHeight 兜底
         var editBoxStyle = {
           width: "100%",
           maxWidth: editBoxW,
@@ -3661,7 +3684,11 @@ window.__ModuleLoader__.load({
           padding: "8px 14px",
           display: "flex",
           flexDirection: "column",
-          gap: "6px"
+          gap: "6px",
+          // 高度下限 = 原气泡高度：短消息时按钮行吃掉余量（编辑框与气泡等高），
+          // 长消息时 = 原高 + 按钮行，绝不变矮。
+          minHeight: bubbleInitH > 0 ? bubbleInitH : void 0,
+          justifyContent: "space-between"
         };
         var taStyle = {
           width: "100%",
@@ -3676,7 +3703,10 @@ window.__ModuleLoader__.load({
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
           
-          maxHeight: "240px",
+          boxSizing: "border-box",
+          padding: "0",
+          flexGrow: 1,
+          maxHeight: "70vh",
           overflowY: "auto"
         };
         var btnRowStyle = { display: "flex", justifyContent: "flex-end", gap: "8px" };
@@ -3803,6 +3833,13 @@ window.__ModuleLoader__.load({
               autoFocus: true,
               placeholder: L.emptyMsg,
               style: taStyle,
+              // 原先只在 onChange 撑高 → 单段长文本（无换行符，rows=1）初次进入编辑只有 1 行高，正是「缩」的观感来源之一。
+              ref: function (el) {
+                if (!el || el.dataset.dbeAutosized === "1") return;
+                el.style.height = "auto";
+                el.style.height = el.scrollHeight + "px";
+                el.dataset.dbeAutosized = "1";
+              },
               onChange: function (e) { setEditText(e.target.value); e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; },
               onKeyDown: function (e) {
                 if (e.key === "Escape") { e.stopPropagation(); cancelEdit(); }
@@ -3878,7 +3915,7 @@ window.__ModuleLoader__.load({
         "div", { style: rowStyle, "data-dsh-easyrewrite": "user", "data-time-hover-root": true },
         renderMessageImagesCompat(msgImages, props),
         React.createElement(
-          "div", { className: "dsh-easyrewrite-bubble", style: bubbleStyle, onClick: onBubbleClick, title: L.clickEdit },
+          "div", { className: "dsh-easyrewrite-bubble", style: bubbleStyle, onClick: onBubbleClick, title: L.clickEdit, ref: bubbleRef },
           text || L.emptyMsg
         ),
         confirming
@@ -3978,7 +4015,9 @@ window.__ModuleLoader__.load({
               // 编辑键：rewrite 关闭时显示（与撤回键同时）
               rewriteOnClick() ? null : actionButton("编辑", "编辑", function (e) {
                 e.stopPropagation();
-                enterEdit(e.currentTarget ? e.currentTarget.offsetWidth : 0);
+                // e.currentTarget 是 34px 的操作按钮而非气泡，量它会得到错误的宽/高。
+                var bubbleEl = bubbleRef.current;
+                enterEdit(bubbleEl ? bubbleEl.offsetWidth : 0, bubbleEl ? bubbleEl.offsetHeight : 0);
               }, iconImg(ICONS.edit, "编辑")),
               React.createElement(CopyButton, { text: text })
             )
